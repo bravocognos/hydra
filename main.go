@@ -25,112 +25,184 @@ package main
 import (
 	"fmt"
 	"io/ioutil"
-	"log"
 	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
 	"strings"
 	"sync"
+
+	log "github.com/apex/log"
+	"github.com/apex/log/handlers/text"
 )
 
-func main() {
-	//
-	// Handles CLI arguments.
-	// TODO: Use Cobra package.
-	//
-    if len(os.Args) > 3 {
-		log.Fatalln(`Error: Should pass only 1 argument. Example: gsp "npm ci"`)
-	}
+var userCommand []string
+var submodulesNames []string
 
-    userCommand := os.Args[1:] // Get the first argument, the user command.
+/*
+ * Helpers
+ */
 
-	//
-	// Handles opening and reading files.
-	//
+// readAndParseGitModulesFile handles opening, reading, and returning the
+// `.gitmodules` file.
+func readAndParseGitModulesFile() []byte {
 	file, err := os.Open(".gitmodules")
 	if err != nil {
-		log.Fatalln("Error: Are you in a folder that has the submodules?")
+		log.Fatal("Error: Are you in a folder that has the submodules?")
 	}
 
 	defer file.Close()
 
-    // TODO: Create a .gitmodules parser to access more information.
-    // Example: Extract submodule path.
+	// TODO: Create a `.gitmodules` parser to access more information.
+	// Example: Extract the path of the submodule.
 	b, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Fatalln("Error: Failed to read .gitmodules. Is it valid?")
-    }
-    
-    //
-    // Extract sudmodule names, and check if there are submodules to work on.
-    //
+		log.Fatal("Error: Failed to read .gitmodules. Is it valid?")
+	}
+
+	return b
+}
+
+// getSubmodulesNames extracts submodule names and checks for submodules to
+// work with. Return the number of submodules and their names.
+func getSubmodulesNames(gitModulesFile []byte) ([]string, int) {
 	var re = regexp.MustCompile(`(?i)\[submodule "(.*)`)
-	var gitModuleFileAsString = string(b)
+	var gitModuleFileAsString = string(gitModulesFile)
 
-    allSubmatch := re.FindAllStringSubmatch(gitModuleFileAsString, -1)
-    numberOfSubmodules := len(allSubmatch);
-    
-    if numberOfSubmodules < 1 {
-        log.Fatalln("Are there any sudmodules?");
-    }
+	allSubmatch := re.FindAllStringSubmatch(gitModuleFileAsString, -1)
+	numberOfSubmodules := len(allSubmatch)
 
-    //
-    // Handles and setup concurrency.
-    // The size of the task queue corresponds to the number of submodules.
-    //
-	tasks := make(chan *exec.Cmd, numberOfSubmodules)
+	if numberOfSubmodules < 1 {
+		log.Fatal("Are there any sudmodules?")
+	}
 
-    var wg sync.WaitGroup
-    
-    // Spawns goroutines, max out (uses all cores).
-    // TODO: Allows user to specify concurrency.
-	for i := 0; i < runtime.NumCPU(); i++ {
-        // Consumes 1 worker/thread from pool.
-        wg.Add(1)
-
-		go func(num int, w *sync.WaitGroup) {
-            // Will indicate that task is done.
-            // Releases worker/thread.
-			defer w.Done()
-
-			for cmd := range tasks {
-                // Notify user about the task that's starting.
-                fmt.Printf(
-                    `Go routine "%d" is running: "%s"`+"\n",
-                    num,
-                    cmd.Args[2],
-                )
-
-                // TODO: Currently, output is quiet. Allows user to see it.
-				_, err := cmd.Output()
-				if err != nil {
-					fmt.Println("can't get stdout:", err)
-				}
-			}
-		}(i, &wg)
-    }
-
-    //
-    // Handles submodule names, and task creation.
-    //
 	for _, match := range allSubmatch {
+		// Cleanup
 		finalMatch := strings.ReplaceAll(match[1], "\"", "")
 		finalMatch = strings.ReplaceAll(finalMatch, "]", "")
 
-		// Go to the submodule folder.
-		cdIntoFolder := "cd " + finalMatch
-
-		// Add task (user command) to the queue.
-		tasks <- exec.Command("sh", "-c", cdIntoFolder+"; "+userCommand[0])
+		submodulesNames = append(submodulesNames, finalMatch)
 	}
 
-    // Close channel.
-	close(tasks)
+	return submodulesNames, numberOfSubmodules
+}
+
+// createTasks handles task creation. A task is a user command that will be
+// executed against all submodules. Each task runs on its own thread,
+// concurrently.
+func createTasks(submodulesNames []string, tasksQueue chan *exec.Cmd) {
+	for _, submoduleName := range submodulesNames {
+		// Go to the submodule folder.
+		cdIntoFolder := "cd " + submoduleName
+
+		// Add task (user command) to the queue.
+		tasksQueue <- exec.Command("sh", "-c", cdIntoFolder+"; "+userCommand[0])
+	}
+}
+
+/*
+ * Starts here
+ */
+
+// Runs before main
+func init() {
+	//
+	// Handles CLI arguments.
+	// TODO: Should use Cobra package.
+	//
+	if len(os.Args) > 3 {
+		log.Fatal(`Error: Should pass only 1 argument. Example: gsp "npm ci"`)
+	}
+
+	userCommand = os.Args[1:] // Get the first argument, the user command.
+
+	//
+	// Setup logger.
+	// Available levels:
+	// - debug
+	// - info
+	// - warn
+	// - warning
+	// - error
+	// - fatal
+	//
+	logLevel := os.Getenv("DEBUG")
+	if logLevel == "" {
+		logLevel = "info"
+	}
+
+	level, err := log.ParseLevel(logLevel)
+	if err != nil {
+		fmt.Println("Invalid log level! " +
+			`Available: "debug", "info", "warn", "warning", "error", and "fatal"`)
+		os.Exit(1)
+	}
+
+	log.SetLevel(level)
+	log.SetHandler(text.New(os.Stderr))
+
+	// Notifies that application started
+	log.Info("Hydra started")
+}
+
+func main() {
+	gitModulesFile := readAndParseGitModulesFile()
+	submodulesNames, numberOfSubmodules := getSubmodulesNames(gitModulesFile)
+
+	//
+	// Handles and setup concurrency.
+	//
+	// The size of the task queue corresponds to the number of submodules.
+	tasksQueue := make(chan *exec.Cmd, numberOfSubmodules)
+
+	var wg sync.WaitGroup
+
+	// Spawns goroutines, max out (uses all cores).
+	// TODO: Allows user to specify concurrency.
+	for i := 0; i < runtime.NumCPU(); i++ {
+		// Consumes 1 worker/thread from pool.
+		wg.Add(1)
+
+		go func(id int, w *sync.WaitGroup) {
+			// Will indicate that task is done.
+			// Releases worker/thread.
+			defer w.Done()
+
+			for cmd := range tasksQueue {
+				log.WithFields(log.Fields{
+					"threadId": id,
+					"cmd":      cmd.Args[2],
+				}).Info("Task started")
+
+				// TODO: Currently, output is quiet. Allows user to see it.
+				output, err := cmd.Output()
+				if err != nil {
+					fmt.Printf(`Error in go routine "%d" running: "%s": %s`+
+						"\n",
+						id,
+						cmd.Args[2],
+						err.Error(),
+					)
+				}
+
+				log.WithFields(log.Fields{
+					"threadId": id,
+					"cmd":      cmd.Args[2],
+					"output":   string(output) + "\n",
+				}).Debug("Done")
+
+			}
+		}(i, &wg)
+	}
+
+	createTasks(submodulesNames, tasksQueue)
+
+	// Close channels.
+	close(tasksQueue)
 
 	// Wait workers finish.
 	wg.Wait()
 
-    // Notifies that all tasks have been completed.
-	fmt.Println("Done")
+	// Notifies that all tasks have been completed.
+	log.Info("Done")
 }
