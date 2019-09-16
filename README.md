@@ -9,7 +9,11 @@ Concurrently runs commands against git submodules.
 Bored of running syncronous commands for git submodules? Meet `hydra`.
 
 ## Usage
-Download from the release page, move to a directory included in your `$PATH`, and and run. Few examples:
+
+1. Download from the release page
+2. Move to a directory included in your `$PATH`, for example `/usr/local/bin` for Mac OS users.
+3. Go to a repository with submodules
+4. Run `hydra`. Few examples:
 
 - `$ hydra "npm install"`
 - `$ hydra "rm -rdf node_modules"`
