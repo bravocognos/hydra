@@ -1,5 +1,7 @@
-# git-submodule-concurrent
-Concurrently runs commands against git submodules
+![Banner](/resources/banner.png?raw=true "Banner")
+
+# Hydra
+Concurrently runs commands against git submodules.
 
 ## Overview
 Bored of running syncronous commands for git submodules? Meet `gsc`.
