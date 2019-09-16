@@ -19,7 +19,8 @@ Download from the release page, move to a directory included in your `$PATH`, an
 You will need Golang. It was developed using version `1.12.9`
 
 1. Clone the project
-2. Make changes
-3. Build `$ go build -o hydra`
-4. Test
-5. Open a Merge Request referecing the opened issues: `Ref.: #ISSUE_NUMBER`
+2. Run `$ go get`
+3. Make changes
+4. Build `$ go build -o hydra`
+5. Test your change(s)
+6. Open a Merge Request referecing the opened issues: `Ref.: #ISSUE_NUMBER`
