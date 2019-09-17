@@ -36,7 +36,7 @@ import (
 	"github.com/apex/log/handlers/text"
 )
 
-var userCommand []string
+var userCommand string
 var submodulesNames []string
 
 var logLevelStr = os.Getenv("LOG_LEVEL")
@@ -112,11 +112,11 @@ func setupLogLevel() {
 // setupCLI is responsible to setup the CLI.
 // TODO: Should use Cobra package.
 func setupCLI() {
-	if len(os.Args) > 3 {
+	if len(os.Args) != 2 {
 		log.Fatal(`Error: Should pass only 1 argument. Example: gsp "npm ci"`)
 	}
 
-	userCommand = os.Args[1:] // Get the first argument, the user command.
+	userCommand = os.Args[1] // Get the user command.
 }
 
 // readAndParseGitModulesFile handles opening, reading, and returning the
@@ -172,7 +172,7 @@ func createTasks(submodulesNames []string, tasksQueue chan *exec.Cmd) {
 		cdIntoFolder := "cd " + submoduleName
 
 		// Add task (user command) to the queue.
-		tasksQueue <- exec.Command("sh", "-c", cdIntoFolder+"; "+userCommand[0])
+		tasksQueue <- exec.Command("sh", "-c", cdIntoFolder+"; "+userCommand)
 	}
 }
 
@@ -213,9 +213,11 @@ func main() {
 			defer w.Done()
 
 			for cmd := range tasksQueue {
+				userCommand = cmd.Args[2]
+
 				log.WithFields(log.Fields{
 					"threadId": id,
-					"cmd":      cmd.Args[2],
+					"cmd":      userCommand,
 				}).Info("Task started")
 
 				// TODO: Currently, output is quiet. Allows user to see it.
@@ -224,17 +226,16 @@ func main() {
 					log.Fatalf(
 						`Error in go routine "%d" running: "%s": %s\n`,
 						id,
-						cmd.Args[2],
+						userCommand,
 						err.Error(),
 					)
 				}
 
 				log.WithFields(log.Fields{
 					"threadId": id,
-					"cmd":      cmd.Args[2],
+					"cmd":      userCommand,
 					"output":   string(output) + "\n",
 				}).Debug("Done")
-
 			}
 		}(i, &wg)
 	}
