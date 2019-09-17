@@ -28,7 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -39,9 +39,85 @@ import (
 var userCommand []string
 var submodulesNames []string
 
+var logLevelStr = os.Getenv("LOG_LEVEL")
+var logLevel = log.InfoLevel
+
+var taskQueueSizeStr = os.Getenv("TASK_QUEUE_SIZE")
+var taskQueueSize int
+
+var concurrencyStr = os.Getenv("CONCURRENCY")
+var concurrency int
+
+var tasksQueue chan *exec.Cmd
+
 /*
  * Helpers
  */
+
+// setupConcurency is responsible to set the concurrent number of workers where
+// 1 worker = 1 thread.
+// TODO: Allows user to specify concurrency.
+func setupConcurency(numberOfSubmodules int) {
+	concurrency = numberOfSubmodules
+
+	if concurrencyStr != "" {
+		concurrencyConverted, err := strconv.Atoi(concurrencyStr)
+
+		if err != nil {
+			log.Fatal("Invalid CONCURRENCY! Did you specify a valid number?")
+		}
+
+		concurrency = concurrencyConverted
+	}
+}
+
+// setupTaskQueue is responsible to setup the size of the Task queue. If nothing
+// is specified, the number of submodules will be specified.
+func setupTaskQueue(numberOfSubmodules int) {
+	taskQueueSize = numberOfSubmodules
+
+	if taskQueueSizeStr != "" {
+		taskQueueSizeConverted, err := strconv.Atoi(taskQueueSizeStr)
+
+		if err != nil {
+			log.Fatal("Invalid TASK_QUEUE_SIZE. " +
+				"Did you specify a valid number?")
+		}
+
+		taskQueueSize = taskQueueSizeConverted
+	}
+
+	// The size of the task queue corresponds to the number of submodules.
+	tasksQueue = make(chan *exec.Cmd, taskQueueSize)
+}
+
+// setupLogLevel is responsible to setup the log level. If nothing is specified,
+// "info" will used. Hydra runs quietly by default.
+func setupLogLevel() {
+	if logLevelStr != "" {
+		logLevelParsed, err := log.ParseLevel(logLevelStr)
+		if err != nil {
+			fmt.Println("Invalid LOG_LEVEL. Available: " +
+				`"debug", "info", "warn", "warning", "error", and "fatal"`)
+			os.Exit(1)
+		}
+
+		logLevel = logLevelParsed
+	}
+
+	log.SetLevel(logLevel)
+	log.SetHandler(text.New(os.Stderr))
+}
+
+// setupCLI is responsible to setup the CLI.
+// TODO: Should use Cobra package.
+func setupCLI() {
+	if len(os.Args) > 3 {
+		log.Fatal(`Error: Should pass only 1 argument. Example: gsp "npm ci"`)
+	}
+
+	userCommand = os.Args[1:] // Get the first argument, the user command.
+}
 
 // readAndParseGitModulesFile handles opening, reading, and returning the
 // `.gitmodules` file.
@@ -55,12 +131,12 @@ func readAndParseGitModulesFile() []byte {
 
 	// TODO: Create a `.gitmodules` parser to access more information.
 	// Example: Extract the path of the submodule.
-	b, err := ioutil.ReadAll(file)
+	fileBytes, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Fatal("Error: Failed to read .gitmodules. Is it valid?")
+		log.Fatal(`Error: Failed to read ".gitmodules". Is it valid?`)
 	}
 
-	return b
+	return fileBytes
 }
 
 // getSubmodulesNames extracts submodule names and checks for submodules to
@@ -106,66 +182,34 @@ func createTasks(submodulesNames []string, tasksQueue chan *exec.Cmd) {
 
 // Runs before main
 func init() {
-	//
-	// Handles CLI arguments.
-	// TODO: Should use Cobra package.
-	//
-	if len(os.Args) > 3 {
-		log.Fatal(`Error: Should pass only 1 argument. Example: gsp "npm ci"`)
-	}
-
-	userCommand = os.Args[1:] // Get the first argument, the user command.
-
-	//
-	// Setup logger.
-	// Available levels:
-	// - debug
-	// - info
-	// - warn
-	// - warning
-	// - error
-	// - fatal
-	//
-	logLevel := os.Getenv("DEBUG")
-	if logLevel == "" {
-		logLevel = "info"
-	}
-
-	level, err := log.ParseLevel(logLevel)
-	if err != nil {
-		fmt.Println("Invalid log level! " +
-			`Available: "debug", "info", "warn", "warning", "error", and "fatal"`)
-		os.Exit(1)
-	}
-
-	log.SetLevel(level)
-	log.SetHandler(text.New(os.Stderr))
-
-	// Notifies that application started
-	log.Info("Hydra started")
+	setupCLI()
+	setupLogLevel()
 }
 
 func main() {
 	gitModulesFile := readAndParseGitModulesFile()
 	submodulesNames, numberOfSubmodules := getSubmodulesNames(gitModulesFile)
 
+	setupTaskQueue(numberOfSubmodules)
+	setupConcurency(numberOfSubmodules)
+
+	// Notifies that application started
+	log.WithFields(log.Fields{
+		"Task Queue Size": taskQueueSize,
+		"Concurrency":     concurrency,
+	}).Info("Hydra started")
+
 	//
 	// Handles and setup concurrency.
 	//
-	// The size of the task queue corresponds to the number of submodules.
-	tasksQueue := make(chan *exec.Cmd, numberOfSubmodules)
-
 	var wg sync.WaitGroup
 
-	// Spawns goroutines, max out (uses all cores).
-	// TODO: Allows user to specify concurrency.
-	for i := 0; i < runtime.NumCPU(); i++ {
+	for i := 0; i < concurrency; i++ {
 		// Consumes 1 worker/thread from pool.
 		wg.Add(1)
 
 		go func(id int, w *sync.WaitGroup) {
-			// Will indicate that task is done.
-			// Releases worker/thread.
+			// Will indicate that task is done. Releases worker/thread.
 			defer w.Done()
 
 			for cmd := range tasksQueue {
@@ -177,8 +221,8 @@ func main() {
 				// TODO: Currently, output is quiet. Allows user to see it.
 				output, err := cmd.Output()
 				if err != nil {
-					fmt.Printf(`Error in go routine "%d" running: "%s": %s`+
-						"\n",
+					log.Fatalf(
+						`Error in go routine "%d" running: "%s": %s\n`,
 						id,
 						cmd.Args[2],
 						err.Error(),
@@ -197,12 +241,8 @@ func main() {
 
 	createTasks(submodulesNames, tasksQueue)
 
-	// Close channels.
+	// Closes channels, waits for all workers to complete, and notifies the user
 	close(tasksQueue)
-
-	// Wait workers finish.
 	wg.Wait()
-
-	// Notifies that all tasks have been completed.
 	log.Info("Done")
 }
